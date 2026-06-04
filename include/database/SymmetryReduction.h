@@ -23,25 +23,24 @@ namespace cube_solver {
  */
 class SymmetryReduction {
 public:
-    static constexpr int NUM_SYMMETRIES = 24;  // Rotation group only (24 elements)
+    static constexpr int NUM_SYMMETRIES = 48;  // Full octahedral group O_h
     
     /**
      * @brief Apply a symmetry operation to a cube state
      * @param cube Input cube state
-     * @param symmetryIdx Index 0-23 representing rotation symmetry
-     * @return Cube after applying rotation symmetry
+     * @param symmetryIdx Index 0-47 representing symmetry
+     * @return Cube after applying symmetry
      * 
-     * Symmetry indices map to rotations:
-     * 0-2:   X axis rotations (0°, 90°, 180°, 270°)
-     * 3-5:   Y axis rotations
-     * 6-23:  Combined rotations
+     * Symmetry indices map to operations:
+     * 0-23: Rotational symmetries
+     * 24-47: Rotational symmetries composed with reflection
      */
     static CubieCube applySymmetry(const CubieCube& cube, int symmetryIdx);
     
     /**
      * @brief Find the canonical (lexicographically smallest) representation
      * @param cube Input cube state
-     * @return The cube state with smallest rank among all 24 rotations
+     * @return The cube state with smallest rank among all 48 symmetries
      * 
      * This is the representative that will be stored in the database.
      * Using the smallest rank ensures we always get the same representative.
@@ -86,9 +85,14 @@ private:
     static CubieCube rotateZ(const CubieCube& cube);
     
     /**
-     * @brief Generate all 24 rotational symmetries from a base cube
+     * @brief Generate a cube reflected across the Left-Right plane
+     */
+    static CubieCube reflectLR(const CubieCube& cube);
+    
+    /**
+     * @brief Generate all 48 symmetries from a base cube
      * @param cube Input cube state
-     * @return Array of 24 rotations of the input cube
+     * @return Array of 48 transformations of the input cube
      */
     static std::array<CubieCube, NUM_SYMMETRIES> getAllSymmetries(const CubieCube& cube);
 };
