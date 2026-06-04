@@ -9,6 +9,16 @@
 #include <queue>
 #include <chrono>
 #include <cstring>
+#include <thread>
+#include <atomic>
+#include <future>
+#include <mutex>
+#include <iomanip>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "database/PatternDatabase.h"
 #include "database/RankCalculator.h"
 #include "database/SymmetryReduction.h"
@@ -19,6 +29,7 @@ PatternDatabase::PatternDatabase(Type type)
     : type(type), maxStates(calculateMaxStates()), generationTime(0) {
 }
 
+// Calculate maximum possible states for this pattern database type
 uint64_t PatternDatabase::calculateMaxStates() const {
     switch (type) {
         case Type::CORNER_PIECES:
@@ -73,6 +84,7 @@ uint64_t PatternDatabase::getCanonicalRank(const CubieCube& cube) const {
     return calculateRank(canonical);
 }
 
+// Helper to compress a distance value into a 4-bit nibble within the memory array
 void PatternDatabase::setDistanceNibble(uint64_t index, uint8_t distance) {
     uint64_t byteIndex = index / 2;
     bool isUpperNibble = (index % 2) == 1;
@@ -106,6 +118,7 @@ uint8_t PatternDatabase::getDistanceNibble(uint64_t index) const {
     }
 }
 
+// Lookup the minimum distance to solved state for a given cube state
 uint8_t PatternDatabase::lookup(const CubieCube& cube) const {
     if (distances.empty()) {
         return UNVISITED;
@@ -119,12 +132,38 @@ uint8_t PatternDatabase::lookup(const CubieCube& cube) const {
     return getDistanceNibble(rank);
 }
 
+namespace {
+    bool setDistanceNibbleAtomicIfUnvisited(std::vector<uint8_t>& distances, uint64_t index, uint8_t distance) {
+        uint64_t byteIndex = index / 2;
+        bool isUpperNibble = (index % 2) == 1;
+        distance &= 0x0F;
+        
+        auto* atomic_byte = reinterpret_cast<std::atomic<uint8_t>*>(&distances[byteIndex]);
+        uint8_t expected = atomic_byte->load(std::memory_order_relaxed);
+        
+        while (true) {
+            uint8_t current_nibble = isUpperNibble ? (expected >> 4) : (expected & 0x0F);
+            if (current_nibble != 0x0F) {
+                return false;
+            }
+            
+            uint8_t desired = isUpperNibble ? ((expected & 0x0F) | (distance << 4))
+                                            : ((expected & 0xF0) | distance);
+                                            
+            if (atomic_byte->compare_exchange_weak(expected, desired, std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+    }
+}
+
+// Run Breadth-First Search (BFS) to map all reachable states up to MAX_DISTANCE
 bool PatternDatabase::generate() {
     std::cout << "Generating pattern database type " << static_cast<int>(type);
     if (useSymmetryReduction) {
         std::cout << " (WITH 48-WAY SYMMETRY REDUCTION)";
     }
-    std::cout << "..." << std::endl;
+    std::cout << " using multi-threading..." << std::endl;
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
@@ -134,50 +173,69 @@ bool PatternDatabase::generate() {
     distances.resize(numBytes, 0xFF);
     std::cout << "  Allocated " << (numBytes / (1024.0 * 1024.0)) << " MB" << std::endl;
     
-    // BFS from solved state
-    std::queue<CubieCube> q;
+    std::vector<CubieCube> current_layer;
     CubieCube solved;
     uint64_t solvedRank = useSymmetryReduction ? getCanonicalRank(solved) : calculateRank(solved);
     
     setDistanceNibble(solvedRank, 0);
-    q.push(solved);
+    current_layer.push_back(solved);
     
     uint64_t statesVisited = 1;
-    uint64_t statesExpanded = 0;
+    uint8_t currentDist = 0;
     
-    while (!q.empty()) {
-        CubieCube current = q.front();
-        q.pop();
+    unsigned int num_threads = 4;
+#ifdef _OPENMP
+    num_threads = omp_get_max_threads();
+#endif
+    std::cout << "  Using up to " << num_threads << " threads for BFS" << std::endl;
+    
+    while (!current_layer.empty() && currentDist < MAX_DISTANCE) {
+        std::vector<std::vector<CubieCube>> next_layers(num_threads);
         
-        uint64_t currentRank = useSymmetryReduction ? getCanonicalRank(current) : calculateRank(current);
-        uint8_t currentDist = getDistanceNibble(currentRank);
+        int n_states = (int)current_layer.size();
         
-        if (currentDist >= MAX_DISTANCE) continue;  // Don't expand beyond max
-        
-        ++statesExpanded;
-        if (statesExpanded % 1000000 == 0) {
-            std::cout << "  Visited: " << statesVisited << ", Expanded: " << statesExpanded << std::endl;
-        }
-        
-        // Try all 18 moves (6 faces × 3 types)
-        for (uint8_t faceIdx = 0; faceIdx < 6; ++faceIdx) {
-            for (uint8_t moveTypeIdx = 0; moveTypeIdx < 3; ++moveTypeIdx) {
-                CubieCube next = current;
-                next.applyMove(
-                    static_cast<Face>(faceIdx),
-                    static_cast<MoveType>(moveTypeIdx)
-                );
-                
-                uint64_t nextRank = useSymmetryReduction ? getCanonicalRank(next) : calculateRank(next);
-                uint8_t nextDist = getDistanceNibble(nextRank);
-                
-                if (nextDist == UNVISITED) {
-                    setDistanceNibble(nextRank, currentDist + 1);
-                    q.push(next);
-                    ++statesVisited;
+        #pragma omp parallel for schedule(dynamic, 2048)
+        for (int i = 0; i < n_states; ++i) {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            auto& local_next = next_layers[tid];
+            
+            const CubieCube& current = current_layer[i];
+            
+            for (uint8_t faceIdx = 0; faceIdx < 6; ++faceIdx) {
+                for (uint8_t moveTypeIdx = 0; moveTypeIdx < 3; ++moveTypeIdx) {
+                    CubieCube next = current;
+                    next.applyMove(static_cast<Face>(faceIdx), static_cast<MoveType>(moveTypeIdx));
+                    
+                    uint64_t nextRank = useSymmetryReduction ? getCanonicalRank(next) : calculateRank(next);
+                    
+                    if (setDistanceNibbleAtomicIfUnvisited(distances, nextRank, currentDist + 1)) {
+                        local_next.push_back(next);
+                    }
                 }
             }
         }
+        
+        size_t next_size = 0;
+        for (const auto& nl : next_layers) {
+            next_size += nl.size();
+        }
+        
+        std::vector<CubieCube> merged_next;
+        merged_next.reserve(next_size);
+        for (auto& nl : next_layers) {
+            merged_next.insert(merged_next.end(), nl.begin(), nl.end());
+        }
+        
+        statesVisited += next_size;
+        current_layer = std::move(merged_next);
+        currentDist++;
+        
+        std::cout << "  Depth " << (int)currentDist << " complete. Visited " 
+                  << statesVisited << " / " << maxStates 
+                  << " (" << std::fixed << std::setprecision(2) << (statesVisited * 100.0 / maxStates) << "%) states." << std::endl;
     }
     
     auto endTime = std::chrono::high_resolution_clock::now();

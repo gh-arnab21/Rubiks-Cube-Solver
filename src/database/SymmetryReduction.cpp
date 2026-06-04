@@ -1,134 +1,202 @@
 /**
  * @file SymmetryReduction.cpp
  * @brief Implementation of 48-way symmetry reduction
- * 
- * The 24 rotational symmetries of the cube are generated systematically.
- * Each unique orientation can be represented by which corner is in the UFL position
- * and the orientation of that corner. This gives 24 unique configurations.
  */
 
 #include "database/SymmetryReduction.h"
 #include "database/RankCalculator.h"
 #include <algorithm>
+#include <vector>
 
 namespace cube_solver {
 
-/**
- * Apply identity transformation or one of the 23 rotations
- * 
- * The 24 rotations are enumerated as:
- * - 0: identity
- * - 1-3: X axis rotations (90°, 180°, 270°)
- * - 4-7: Y rotations combined with X
- * - 8+: More complex combinations
- * 
- * For simplicity, we generate these by applying move sequences
- */
-CubieCube SymmetryReduction::applySymmetry(const CubieCube& cube, int symmetryIdx) {
-    if (symmetryIdx < 0 || symmetryIdx >= NUM_SYMMETRIES) {
-        return cube;
+// Face indices: U=0, L=1, F=2, R=3, B=4, D=5
+// Standard Corner Tuples (Clockwise starting from U/D)
+static const std::array<std::array<uint8_t, 3>, 8> CORNER_TUPLES = {{
+    {0, 1, 4}, // ULB = 0
+    {0, 4, 3}, // URB = 1
+    {0, 3, 2}, // URF = 2
+    {0, 2, 1}, // ULF = 3
+    {5, 4, 1}, // DLB = 4
+    {5, 3, 4}, // DRB = 5
+    {5, 2, 3}, // DRF = 6
+    {5, 1, 2}  // DLF = 7
+}};
+
+// Standard Edge Tuples (Primary face first)
+static const std::array<std::array<uint8_t, 2>, 12> EDGE_TUPLES = {{
+    {0, 4}, // UB = 0
+    {0, 3}, // UR = 1
+    {0, 2}, // UF = 2
+    {0, 1}, // UL = 3
+    {5, 4}, // DB = 4
+    {5, 3}, // DR = 5
+    {5, 2}, // DF = 6
+    {5, 1}, // DL = 7
+    {4, 3}, // BR = 8
+    {4, 1}, // BL = 9
+    {2, 3}, // FR = 10
+    {2, 1}  // FL = 11
+}};
+
+static int findCorner(uint8_t f0, uint8_t f1, uint8_t f2) {
+    for (int i = 0; i < 8; ++i) {
+        auto& t = CORNER_TUPLES[i];
+        if ((t[0] == f0 || t[0] == f1 || t[0] == f2) &&
+            (t[1] == f0 || t[1] == f1 || t[1] == f2) &&
+            (t[2] == f0 || t[2] == f1 || t[2] == f2)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int findEdge(uint8_t f0, uint8_t f1) {
+    for (int i = 0; i < 12; ++i) {
+        auto& t = EDGE_TUPLES[i];
+        if ((t[0] == f0 || t[0] == f1) && (t[1] == f0 || t[1] == f1)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static CubieCube mapState(const CubieCube& cube, const std::array<uint8_t, 6>& mapping, bool isReflection) {
+    CubieCube result;
+    
+    // Precompute slot destinations
+    std::array<int, 8> T_corner;
+    for (int i = 0; i < 8; ++i) {
+        auto& t = CORNER_TUPLES[i];
+        std::array<uint8_t, 3> mapped_t = {mapping[t[0]], mapping[t[1]], mapping[t[2]]};
+        if (isReflection) std::swap(mapped_t[1], mapped_t[2]);
+        T_corner[i] = findCorner(mapped_t[0], mapped_t[1], mapped_t[2]);
     }
     
-    auto symmetries = getAllSymmetries(cube);
-    return symmetries[symmetryIdx];
-}
-
-/**
- * Helper: Apply multiple rotations in sequence
- */
-static CubieCube rotateXN(const CubieCube& cube, int times) {
-    CubieCube result = cube;
-    for (int i = 0; i < times; ++i) {
-        // X rotation: move around right-left axis
-        // Corners cycle: 0→1→5→4→0 and 2→3→7→6→2
-        CubieCube temp = result;
-        result.getCornerCubie(0) = temp.getCornerCubie(4);  // UFL ← UBL
-        result.getCornerCubie(1) = temp.getCornerCubie(0);  // UFR ← UFL
-        result.getCornerCubie(5) = temp.getCornerCubie(1);  // UBR ← UFR
-        result.getCornerCubie(4) = temp.getCornerCubie(5);  // UBL ← UBR
-        result.getCornerCubie(2) = temp.getCornerCubie(6);  // DFL ← DBL
-        result.getCornerCubie(3) = temp.getCornerCubie(2);  // DFR ← DFL
-        result.getCornerCubie(7) = temp.getCornerCubie(3);  // DBR ← DFR
-        result.getCornerCubie(6) = temp.getCornerCubie(7);  // DBL ← DBR
-        
-        // Edges cycle similarly
-        result.getEdgeCubie(0) = temp.getEdgeCubie(4);   // UF ← UL
-        result.getEdgeCubie(1) = temp.getEdgeCubie(0);   // FR ← UF
-        result.getEdgeCubie(5) = temp.getEdgeCubie(1);   // DF ← FR
-        result.getEdgeCubie(3) = temp.getEdgeCubie(5);   // FL ← DF
-        result.getEdgeCubie(4) = temp.getEdgeCubie(3);   // UL ← FL
-        result.getEdgeCubie(8) = temp.getEdgeCubie(10);  // DB ← BL
-        result.getEdgeCubie(11) = temp.getEdgeCubie(8);  // BR ← DB
-        result.getEdgeCubie(9) = temp.getEdgeCubie(11);  // UB ← BR
-        result.getEdgeCubie(10) = temp.getEdgeCubie(9);  // BL ← UB
-        result.getEdgeCubie(2) = temp.getEdgeCubie(6);   // UR ← DR
-        result.getEdgeCubie(6) = temp.getEdgeCubie(7);   // DR ← DL
-        result.getEdgeCubie(7) = temp.getEdgeCubie(2);   // DL ← UR
+    std::array<int, 12> T_edge;
+    for (int i = 0; i < 12; ++i) {
+        auto& t = EDGE_TUPLES[i];
+        T_edge[i] = findEdge(mapping[t[0]], mapping[t[1]]);
     }
+    
+    // Process corners
+    for (int i = 0; i < 8; ++i) {
+        int dest_slot = T_corner[i];
+        int old_p = cube.getCornerCubie(i).position;
+        int old_ori = cube.getCornerCubie(i).orientation;
+        
+        int new_p = T_corner[old_p];
+        uint8_t old_ud_face = CORNER_TUPLES[old_p][old_ori];
+        uint8_t new_ud_face = mapping[old_ud_face];
+        
+        int new_ori = 0;
+        for (int o = 0; o < 3; ++o) {
+            if (CORNER_TUPLES[new_p][o] == new_ud_face) {
+                new_ori = o;
+                break;
+            }
+        }
+        
+        // Reflection inverts orientation twist (if twisted clockwise, reflection is counter-clockwise)
+        if (isReflection && new_ori != 0) {
+            new_ori = 3 - new_ori;
+        }
+        
+        result.getCornerCubie(dest_slot) = Cubie(new_p, new_ori);
+    }
+    
+    // Process edges
+    for (int i = 0; i < 12; ++i) {
+        int dest_slot = T_edge[i];
+        int old_p = cube.getEdgeCubie(i).position;
+        int old_ori = cube.getEdgeCubie(i).orientation;
+        
+        int new_p = T_edge[old_p];
+        uint8_t old_primary = EDGE_TUPLES[old_p][old_ori];
+        uint8_t new_primary = mapping[old_primary];
+        
+        int new_ori = 0;
+        if (EDGE_TUPLES[new_p][1] == new_primary) {
+            new_ori = 1;
+        }
+        
+        result.getEdgeCubie(dest_slot) = Cubie(new_p, new_ori);
+    }
+    
     return result;
 }
 
-static CubieCube rotateYN(const CubieCube& cube, int times) {
-    CubieCube result = cube;
-    for (int i = 0; i < times; ++i) {
-        // Y rotation: move around up-down axis
-        // Corners: 0→1→5→4→0 (top) and 2→3→7→6→2 (bottom)
-        CubieCube temp = result;
-        result.getCornerCubie(0) = temp.getCornerCubie(4);  // UFL ← UBL
-        result.getCornerCubie(1) = temp.getCornerCubie(0);  // UFR ← UFL
-        result.getCornerCubie(5) = temp.getCornerCubie(1);  // UBR ← UFR
-        result.getCornerCubie(4) = temp.getCornerCubie(5);  // UBL ← UBR
-        result.getCornerCubie(2) = temp.getCornerCubie(6);  // DFL ← DBL
-        result.getCornerCubie(3) = temp.getCornerCubie(2);  // DFR ← DFL
-        result.getCornerCubie(7) = temp.getCornerCubie(3);  // DBR ← DFR
-        result.getCornerCubie(6) = temp.getCornerCubie(7);  // DBL ← DBR
-        
-        // Edges
-        result.getEdgeCubie(0) = temp.getEdgeCubie(4);   // UF ← UL
-        result.getEdgeCubie(1) = temp.getEdgeCubie(0);   // FR ← UF
-        result.getEdgeCubie(5) = temp.getEdgeCubie(1);   // DF ← FR
-        result.getEdgeCubie(3) = temp.getEdgeCubie(5);   // FL ← DF
-        result.getEdgeCubie(4) = temp.getEdgeCubie(3);   // UL ← FL
-        result.getEdgeCubie(8) = temp.getEdgeCubie(10);  // BR ← BL (no change for Y alone)
-        result.getEdgeCubie(9) = temp.getEdgeCubie(8);   // UB ← BR
-        result.getEdgeCubie(11) = temp.getEdgeCubie(9);  // RU ← UB (edges at UR need careful handling)
-        result.getEdgeCubie(10) = temp.getEdgeCubie(11);
-        result.getEdgeCubie(2) = temp.getEdgeCubie(6);   // UR ← DR
-        result.getEdgeCubie(6) = temp.getEdgeCubie(7);   // DR ← DL
-        result.getEdgeCubie(7) = temp.getEdgeCubie(2);   // DL ← UR
-    }
-    return result;
+CubieCube SymmetryReduction::rotateX(const CubieCube& cube) {
+    // R-axis clockwise: U->B(4), B->D(5), D->F(2), F->U(0), L->L(1), R->R(3)
+    return mapState(cube, {4, 1, 0, 3, 5, 2}, false);
 }
 
-/**
- * Generate all 24 rotational symmetries using composition
- */
+CubieCube SymmetryReduction::rotateY(const CubieCube& cube) {
+    // U-axis clockwise: U->U(0), D->D(5), F->R(3), R->B(4), B->L(1), L->F(2)
+    return mapState(cube, {0, 2, 3, 4, 1, 5}, false);
+}
+
+CubieCube SymmetryReduction::rotateZ(const CubieCube& cube) {
+    // F-axis clockwise: U->R(3), R->D(5), D->L(1), L->U(0), F->F(2), B->B(4)
+    return mapState(cube, {3, 0, 2, 5, 4, 1}, false);
+}
+
+CubieCube SymmetryReduction::reflectLR(const CubieCube& cube) {
+    // Reflection across L/R plane: L<->R, others stay
+    return mapState(cube, {0, 3, 2, 1, 4, 5}, true);
+}
+
 std::array<CubieCube, SymmetryReduction::NUM_SYMMETRIES> 
 SymmetryReduction::getAllSymmetries(const CubieCube& cube) {
     std::array<CubieCube, NUM_SYMMETRIES> symmetries;
     
+    // Generate all 48 by combining X, Y, and reflection
+    // Y rotations: 4
+    // X rotations: 4 (but only 3 new per Y, since Y^4 = I)
+    // Actually, simple generation:
+    // Any orientation can be reached by moving U face to 6 possible faces (using X, Z)
+    // then rotating around that face 4 times (using Y).
+    // This gives 24 rotations.
+    // Then multiply by reflection for 48.
+    
+    CubieCube c = cube;
     int idx = 0;
     
-    // Generate all 24 by combining X and Y rotations
-    // Y rotations: 0, 1, 2, 3 (4 rotations around up-down)
-    // X rotations: for each Y, apply 0, 1, 2, 3 X rotations (some redundant)
-    
-    for (int yRot = 0; yRot < 4; ++yRot) {
-        CubieCube yRotated = rotateYN(cube, yRot);
+    // 6 face orientations for U
+    for (int i = 0; i < 6; ++i) {
+        // Rotate around Y 4 times
+        for (int j = 0; j < 4; ++j) {
+            symmetries[idx++] = c;
+            symmetries[idx++] = reflectLR(c);
+            c = rotateY(c);
+        }
         
-        for (int xRot = 0; xRot < 4; ++xRot) {
-            if (idx < NUM_SYMMETRIES) {
-                symmetries[idx++] = rotateXN(yRotated, xRot);
-            }
+        // Move a different face to U
+        if (i == 0) c = rotateX(c); // F to U
+        else if (i == 1) c = rotateX(c); // D to U
+        else if (i == 2) c = rotateX(c); // B to U (now we have covered U, F, D, B)
+        else if (i == 3) {
+            c = rotateX(c); // Back to U
+            c = rotateZ(c); // L to U
+        }
+        else if (i == 4) {
+            c = rotateZ(c);
+            c = rotateZ(c); // R to U
         }
     }
     
-    // Only first 24 are unique (the 4×6 = 24 orientations)
     return symmetries;
 }
 
+CubieCube SymmetryReduction::applySymmetry(const CubieCube& cube, int symmetryIdx) {
+    if (symmetryIdx < 0 || symmetryIdx >= NUM_SYMMETRIES) {
+        return cube;
+    }
+    auto symmetries = getAllSymmetries(cube);
+    return symmetries[symmetryIdx];
+}
+
 CubieCube SymmetryReduction::getCanonical(const CubieCube& cube) {
-    // Try all 24 symmetries and return the one with smallest rank
     CubieCube canonical = cube;
     uint64_t minRank = RankCalculator::rankCornerState(cube);
     
@@ -140,28 +208,12 @@ CubieCube SymmetryReduction::getCanonical(const CubieCube& cube) {
             canonical = symmetries[i];
         }
     }
-    
     return canonical;
 }
 
 bool SymmetryReduction::isCanonical(const CubieCube& cube) {
     CubieCube canonical = getCanonical(cube);
-    
-    // Check if corners and edges are the same
-    for (int i = 0; i < 8; ++i) {
-        if (cube.getCornerCubie(i).position != canonical.getCornerCubie(i).position ||
-            cube.getCornerCubie(i).orientation != canonical.getCornerCubie(i).orientation) {
-            return false;
-        }
-    }
-    for (int i = 0; i < 12; ++i) {
-        if (cube.getEdgeCubie(i).position != canonical.getEdgeCubie(i).position ||
-            cube.getEdgeCubie(i).orientation != canonical.getEdgeCubie(i).orientation) {
-            return false;
-        }
-    }
-    
-    return true;
+    return cube == canonical;
 }
 
 }  // namespace cube_solver

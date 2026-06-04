@@ -23,12 +23,14 @@ void RubiksCube::reset() {
 
 // ============ MOVE OPERATIONS ============
 
+// Applies a single move (Face + Type) to the cube state and records it in the history
 void RubiksCube::applyMove(Face face, MoveType moveType) {
     // TODO: Apply move and track in history
     state.applyMove(face, moveType);
     moveHistory.push_back({face, moveType});
 }
 
+// Parses a string of space-separated standard notation moves and applies them sequentially
 bool RubiksCube::applyMoveSequence(const std::string& moveSequence) {
     // TODO: Parse and apply move sequence
     // Format: "R U R' U' R U2 R'" (space-separated)
@@ -59,6 +61,7 @@ bool RubiksCube::applyMoveSequence(const std::string& moveSequence) {
     return true;
 }
 
+// Randomly scrambles the cube state while avoiding consecutive moves on the same face
 void RubiksCube::scramble(uint32_t numMoves) {
     // TODO: Generate random scramble avoiding consecutive redundant moves
     // 
@@ -125,6 +128,7 @@ uint64_t RubiksCube::getEdgeOrientationRank() const {
 
 // ============ MOVE HISTORY ============
 
+// Converts the sequence of applied moves into a standard notation string (e.g., "R U R'")
 std::string RubiksCube::getMoveHistoryString() const {
     // TODO: Convert move history to standard notation string
     // Format: "R U R' U' R U2 R'" (space-separated)
@@ -170,6 +174,7 @@ std::string RubiksCube::getMoveHistoryString() const {
 
 // ============ HELPER FUNCTIONS ============
 
+// Helper to parse a single string token into a Face and MoveType
 bool RubiksCube::parseMove(const std::string& moveStr, Face& face, MoveType& moveType) {
     // TODO: Parse move notation (e.g., "R", "U'", "F2")
     //
