@@ -15,7 +15,7 @@
 #include <set>
 #include "cube/CubieCube.h"
 #include "cube/RubiksCube.h"
-#include "database/RankCalculator.h"
+#include "database/RankCalculator.h"    
 #include "database/PatternDatabase.h" // Added to test the actual physical memory
 
 using namespace cube_solver;
